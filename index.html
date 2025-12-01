@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Audio Spectrum 3D - Music Visualizer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #0a0e27 0%, #1a1a3e 100%);
+      color: #fff;
+      overflow: hidden;
+      height: 100vh;
+    }
+    #canvas { display: block; width: 100%; height: 100%; }
+    #controls {
+      position: fixed;
+      top: 20px;
+      left: 20px;
+      z-index: 100;
+      background: rgba(0, 0, 0, 0.6);
+      padding: 20px;
+      border-radius: 10px;
+      backdrop-filter: blur(10px);
+      min-width: 300px;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    #controls h2 {
+      margin-bottom: 15px;
+      font-size: 20px;
+      background: linear-gradient(135deg, #00d4ff, #7c3aed);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .control-group {
+      margin-bottom: 15px;
+    }
+    .control-group label {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 13px;
+      color: #00d4ff;
+    }
+    input[type="file"],
+    input[type="range"],
+    select,
+    button {
+      width: 100%;
+      padding: 10px;
+      margin-bottom: 10px;
+      border: 1px solid #00d4ff;
+      background: rgba(0, 212, 255, 0.1);
+      color: #fff;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    input[type="range"] {
+      cursor: pointer;
+      padding: 0;
+      height: 6px;
+    }
+    button {
+      background: linear-gradient(135deg, #00d4ff, #7c3aed);
+      border: none;
+      font-weight: bold;
+      transition: all 0.3s;
+    }
+    button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 20px rgba(0, 212, 255, 0.3);
+    }
+    #stats {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background: rgba(0, 0, 0, 0.6);
+      padding: 15px;
+      border-radius: 10px;
+      backdrop-filter: blur(10px);
+      font-size: 12px;
+      font-family: 'Courier New', monospace;
+    }
+    .stat-line { margin: 5px 0; }
+    .stat-label { color: #00d4ff; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <h2>🎵 Audio Spectrum 3D</h2>
+    
+    <div class="control-group">
+      <label>Upload Audio File</label>
+      <input type="file" id="audioFile" accept="audio/*">
+    </div>
+
+    <div class="control-group">
+      <label>Visualization Mode</label>
+      <select id="modeSelect">
+        <option value="bars">Spectrum Bars</option>
+        <option value="waveform">Waveform</option>
+        <option value="particles">Particles</option>
+      </select>
+    </div>
+
+    <div class="control-group">
+      <label>Sensitivity: <span id="sensitivityValue">1.0</span></label>
+      <input type="range" id="sensitivity" min="0.1" max="3.0" step="0.1" value="1.0">
+    </div>
+
+    <div class="control-group">
+      <label>Smoothing: <span id="smoothingValue">0.8</span></label>
+      <input type="range" id="smoothing" min="0" max="1" step="0.05" value="0.8">
+    </div>
+
+    <button id="playPauseBtn">Play / Pause</button>
+    <button id="micBtn">Use Microphone</button>
+  </div>
+
+  <div id="stats">
+    <div class="stat-line"><span class="stat-label">FPS:</span> <span id="fpsValue">0</span></div>
+    <div class="stat-line"><span class="stat-label">Frequency Bins:</span> <span id="binsValue">0</span></div>
+    <div class="stat-line"><span class="stat-label">Status:</span> <span id="statusValue">Ready</span></div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.2/dist/gsap.min.js"></script>
+  <script>
+    // Audio Spectrum 3D Visualizer
+    class AudioVisualizer {
+      constructor() {
+        this.scene = new THREE.Scene();
+        this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.shadowMap.enabled = true;
+        document.body.appendChild(this.renderer.domElement);
+
+        this.camera.position.z = 150;
+        this.camera.position.y = 0;
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        this.scene.add(ambientLight);
+
+        const pointLight = new THREE.PointLight(0x00d4ff, 1);
+        pointLight.position.set(100, 100, 100);
+        this.scene.add(pointLight);
+
+        // Audio setup
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        this.analyser = this.audioContext.createAnalyser();
+        this.analyser.fftSize = 256;
+        this.analyser.smoothingTimeConstant = 0.8;
+        this.frequencyData = new Uint8Array(this.analyser.frequencyBinCount);
+
+        // Bars
+        this.bars = [];
+        this.createBars();
+
+        // Variables
+        this.mode = 'bars';
+        this.sensitivity = 1.0;
+        this.smoothing = 0.8;
+        this.fps = 0;
+        this.frameCount = 0;
+        this.lastTime = Date.now();
+
+        this.setupEventListeners();
+        this.animate();
+      }
+
+      createBars() {
+        const barCount = this.analyser.frequencyBinCount;
+        const barWidth = (2 * Math.PI) / barCount;
+
+        for (let i = 0; i < barCount; i++) {
+          const geometry = new THREE.BoxGeometry(barWidth * 0.8, 1, 10);
+          const material = new THREE.MeshPhongMaterial({
+            color: new THREE.Color().setHSL(i / barCount, 1, 0.5),
+            emissive: new THREE.Color().setHSL(i / barCount, 1, 0.3),
+          });
+          const bar = new THREE.Mesh(geometry, material);
+          bar.castShadow = true;
+          bar.receiveShadow = true;
+          const angle = (i / barCount) * Math.PI * 2;
+          bar.position.x = Math.cos(angle) * 80;
+          bar.position.z = Math.sin(angle) * 80;
+          bar.lookAt(0, 0, 0);
+          this.scene.add(bar);
+          this.bars.push({ mesh: bar, baseScale: 1 });
+        }
+      }
+
+      updateVisualization() {
+        this.analyser.getByteFrequencyData(this.frequencyData);
+
+        for (let i = 0; i < this.bars.length; i++) {
+          const frequency = this.frequencyData[i] / 255;
+          const scale = 1 + frequency * this.sensitivity * 3;
+          this.bars[i].mesh.scale.y = scale;
+          this.bars[i].mesh.material.emissive.setHSL(
+            i / this.bars.length,
+            1,
+            frequency * 0.5
+          );
+        }
+      }
+
+      setupEventListeners() {
+        document.getElementById('audioFile').addEventListener('change', (e) => this.loadAudio(e));
+        document.getElementById('playPauseBtn').addEventListener('click', () => this.toggleAudio());
+        document.getElementById('micBtn').addEventListener('click', () => this.useMicrophone());
+        document.getElementById('sensitivity').addEventListener('change', (e) => {
+          this.sensitivity = parseFloat(e.target.value);
+          document.getElementById('sensitivityValue').textContent = this.sensitivity.toFixed(1);
+        });
+        document.getElementById('smoothing').addEventListener('change', (e) => {
+          this.smoothing = parseFloat(e.target.value);
+          this.analyser.smoothingTimeConstant = this.smoothing;
+          document.getElementById('smoothingValue').textContent = this.smoothing.toFixed(2);
+        });
+        document.getElementById('modeSelect').addEventListener('change', (e) => {
+          this.mode = e.target.value;
+        });
+      }
+
+      loadAudio(event) {
+        const file = event.target.files[0];
+        const url = URL.createObjectURL(file);
+        this.playAudioFromUrl(url);
+      }
+
+      playAudioFromUrl(url) {
+        const audio = new Audio(url);
+        audio.crossOrigin = 'anonymous';
+        const source = this.audioContext.createMediaElementAudioSource(audio);
+        source.connect(this.analyser);
+        this.analyser.connect(this.audioContext.destination);
+        audio.play();
+        document.getElementById('statusValue').textContent = 'Playing';
+      }
+
+      toggleAudio() {
+        if (this.audioContext.state === 'suspended') {
+          this.audioContext.resume();
+        }
+      }
+
+      useMicrophone() {
+        navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+          const source = this.audioContext.createMediaStreamAudioSource(stream);
+          source.connect(this.analyser);
+          this.analyser.connect(this.audioContext.destination);
+          document.getElementById('statusValue').textContent = 'Microphone';
+        });
+      }
+
+      animate() {
+        requestAnimationFrame(() => this.animate());
+
+        this.updateVisualization();
+        this.scene.rotation.z += 0.0002;
+
+        this.frameCount++;
+        const now = Date.now();
+        if (now >= this.lastTime + 1000) {
+          this.fps = this.frameCount;
+          this.frameCount = 0;
+          this.lastTime = now;
+          document.getElementById('fpsValue').textContent = this.fps;
+          document.getElementById('binsValue').textContent = this.bars.length;
+        }
+
+        this.renderer.render(this.scene, this.camera);
+      }
+    }
+
+    window.addEventListener('load', () => {
+      new AudioVisualizer();
+    });
+
+    window.addEventListener('resize', () => {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      // Update renderer and camera if needed
+    });
+  </script>
+</body>
+</html>
